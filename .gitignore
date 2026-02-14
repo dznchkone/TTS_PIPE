@@ -1,0 +1,45 @@
+# Byte-code files
+*.pyc
+__pycache__/
+
+# Output of compiling extensions
+*.so
+*.wo
+*.lo
+*.o
+*.pyd
+
+# Temporary files, caches, and logs
+*.log
+*.sqlite3
+*.db
+.cache
+.pytest_cache
+pip-log.txt
+pip-delete-this-line.txt
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+*.whl
+
+# Specific IDE/Editor files
+.idea/          # For PyCharm
+.vscode/        # For VS Code (though some config files may be useful to commit)
+.history/       # VS Code history
+nbuser.json     # Jupyter Notebook
+
+audio_queue/
+cache/
+.clinerules/
+.env.backup
+.env
