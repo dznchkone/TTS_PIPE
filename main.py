@@ -3,15 +3,11 @@
 TTS бот для Twitch на базе Coqui XTTS v2.0.3
 Фокус: стабильная генерация чистой русской речи без ошибок inf/nan
 """
-
-import asyncio
+import sounddevice as sd
 import hashlib
 import os
-import re
 import signal
 import sys
-import subprocess
-import shlex
 import time
 from pathlib import Path
 from queue import Queue, Empty
@@ -55,9 +51,15 @@ except Exception as e:
 print("[INFO] Инициализация Coqui XTTS v2.0.3...")
 from TTS.api import TTS
 
+# Get device
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+
 tts_engine = TTS(
-    model_name="tts_models/multilingual/multi-dataset/xtts_v2"
-)
+    model_name="tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False, gpu=False
+).to("cpu")
+
 
 print("[OK] XTTS модель загружена")
 print(f"[INFO] Поддерживаемые языки: {tts_engine.languages}")
@@ -113,7 +115,7 @@ import subprocess
 import shlex
 
 def text_to_speech(text: str, output_path: Path) -> bool:
-    """Генерация речи через tts """
+    """Генерация речи через TTS API"""
     start_time = time.time()
     
     try:
@@ -127,94 +129,56 @@ def text_to_speech(text: str, output_path: Path) -> bool:
             print(f"[CACHE] ({time.time() - start_time:.2f}с): {text[:40]}...")
             return True
         
-        # АГРЕССИВНАЯ САНИТАЦИЯ ТЕКСТА (защита от инъекций + стабильность)
-        text = re.sub(r'[^а-яА-ЯёЁa-zA-Z0-9\s.,!?;:\-\'"()]', ' ', text)
-        text = text.replace("…", "...").replace("—", "-").replace("«", "\"").replace("»", "\"")
-        text = " ".join(text.split()).lower()
-        text = text[:Config.MAX_TEXT_LENGTH].strip()
-        if text and not text.endswith((".", "!", "?")):
-            text += "."
+        # САНИТАЦИЯ ТЕКСТА (используем существующую функцию)
+        from filters import sanitize_text
+        text = sanitize_text(text, Config.MAX_TEXT_LENGTH)
+        if not text:
+            print(f"[ERROR] Некорректный текст для генерации: {text}")
+            return False
         
-        # Путь к консольной утилите tts (находится в venv/Scripts/tts.exe на Windows)
-        tts_executable = Path(sys.executable).parent / "tts.exe"
+        # Определяем параметры спикера
+        speaker_wav = Config.get_reference_voice()
         
-        # Если tts.exe не найден — пробуем через python -m TTS.bin.synthesize
-        if not tts_executable.exists():
-            print(f"[WARN] tts.exe не найден в {tts_executable}, используем альтернативный вызов")
-            cmd = [
-                sys.executable, "-m", "TTS.bin.synthesize",
-                "--model_name", "tts_models/multilingual/multi-dataset/xtts_v2",
-                "--text", text,
-                "--speaker_idx", "Claribel Dervla",
-                "--language_idx", "ru",
-                "--out_path", str(output_path)
-            ]
-        else:
-            # Формируем команду для Windows (с правильной экранировкой)
-            # ВАЖНО: на Windows НЕ используем shlex.quote — ломает кириллицу
-            cmd = [
-                str(tts_executable),
-                "--model_name", "tts_models/multilingual/multi-dataset/xtts_v2",
-                "--text", text,
-                "--speaker_idx", "Claribel Dervla",
-                "--language_idx", "ru",
-                "--out_path", str(output_path)
-            ]
+        safe_speaker_wav = str(Path(speaker_wav).resolve())
         
-        print(f"[TTS] Вызов консольной утилиты: tts \"...{text[:30]}...\"")
+        language = "ru"  # Всегда используем русский язык
         
-        # Выполняем команду с таймаутом 30 секунд
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='ignore',
-            timeout=30
+        # Генерация речи через TTS API
+        print(f"[TTS] Генерация речи: \"{text}...\"")
+        
+        # Используем прямой вызов TTS API
+        wav = tts_engine.tts(
+            text=text,
+            speaker_wav=safe_speaker_wav,
+            language=language,
+            split_sentences=True,
         )
         
-        if result.returncode != 0:
-            print(f"[ERROR] tts завершился с кодом {result.returncode}")
-            print(f"stderr: {result.stderr[:200]}")
-            return False
-        
-        # Проверяем, что файл создан
-        if not output_path.exists() or output_path.stat().st_size < 1000:
-            print(f"[ERROR] Файл не создан или пустой: {output_path}")
-            return False
-        
-        # После успешной генерации (перед кэшированием):
-        if output_path.exists():
-            # Создаём/обновляем символическую ссылку на последний файл
-            latest_path = Config.QUEUE_DIR / "latest.wav"
-            if latest_path.exists() or latest_path.is_symlink():
-                try:
-                    latest_path.unlink()
-                except:
-                    pass
-            try:
-                os.symlink(output_path, latest_path)
-            except:
-                # На Windows без прав администратора создаём копию
-                import shutil
-                shutil.copy2(output_path, latest_path)
+        # # Проверяем, что файл создан
+        # if not output_path.exists() or output_path.stat().st_size < 1000:
+        #     print(f"[ERROR] Файл не создан или пустой: {output_path}")
+        #     return False
 
-        # Кэширование
-        if not cache_path.exists():
-            os.link(output_path, cache_path)
+        # # Кэширование
+        # if not cache_path.exists():
+        #     os.link(output_path, cache_path)
         
         elapsed = time.time() - start_time
         print(f"[TTS] Сгенерировано ({elapsed:.2f}с): \"{text[:50]}\"")
+        print(f"Max value: {np.max(wav)}")
+        print(f"Min value: {np.min(wav)}")
+        print(f"First 10 values: {wav[:10]}")
+        sample_rate = 24000 
+        sd.play(np.array(wav), sample_rate)
+        sd.wait()  # Ждем окончания воспроизведения
         return True
         
-    except subprocess.TimeoutExpired:
-        print(f"[ERROR] Таймаут генерации (30 сек)")
-        return False
     except Exception as e:
         print(f"[ERROR] Ошибка генерации: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         try:
+            # Создаем пустой файл в случае ошибки
             sf.write(str(output_path), np.zeros(24000, dtype=np.float32), 24000)
         except:
             pass
